@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SmartER – AI Healthcare Routing</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+    <style>
+      *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+      html, body, #root { height: 100%; width: 100%; }
+      body {
+        font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'SF Pro Display', sans-serif;
+        background: #0a0a0f;
+        color: #e2e8f0;
+        -webkit-font-smoothing: antialiased;
+      }
+      .leaflet-popup-content-wrapper {
+        background: rgba(15,15,25,0.97) !important;
+        color: #e2e8f0 !important;
+        border: 1px solid rgba(255,255,255,0.12) !important;
+        border-radius: 14px !important;
+        backdrop-filter: blur(20px) !important;
+        box-shadow: 0 20px 60px rgba(0,0,0,0.6) !important;
+        font-family: 'Inter', sans-serif !important;
+      }
+      .leaflet-popup-content { color: #e2e8f0 !important; font-size: 13px !important; line-height: 1.6 !important; }
+      .leaflet-popup-tip { background: rgba(15,15,25,0.97) !important; }
+      .leaflet-container { background: #0d1117 !important; font-family: 'Inter', sans-serif !important; }
+      .leaflet-control-zoom a {
+        background: rgba(15,15,25,0.9) !important;
+        color: #e2e8f0 !important;
+        border-color: rgba(255,255,255,0.1) !important;
+      }
+      .leaflet-control-attribution {
+        background: rgba(0,0,0,0.5) !important;
+        color: #6b7280 !important;
+        font-size: 10px !important;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
