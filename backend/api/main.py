@@ -2,21 +2,6 @@
 main.py  –  FastAPI Backend
 ============================
 Healthcare Routing & Emergency Management API
-
-Endpoints:
-  POST /add_patient              → register new emergency patient
-  GET  /get_hospitals            → list hospitals with live bed counts
-  GET  /get_ambulances           → list ambulances with live GPS
-  POST /assign_resources         → run RL model to assign hospital + ambulance
-  PUT  /update_ambulance_location → simulate GPS movement
-  PUT  /update_hospital_beds     → update bed availability
-  GET  /get_live_tracking        → snapshot of all live positions
-  GET  /simulation/start         → start automatic simulation loop
-  GET  /simulation/stop          → stop simulation loop
-  WS   /ws/live                  → WebSocket for real-time push updates
-
-Run:
-    uvicorn main:app --reload --port 8000
 """
 
 import asyncio
@@ -36,16 +21,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 # ── RL imports ───────────────────────────────────────────────────────────────
-# Adjust path so backend can import the RL modules
 BACKEND_DIR = os.path.dirname(__file__)
 sys.path.insert(0, os.path.join(BACKEND_DIR, "..", "openenv_env"))
 sys.path.insert(0, os.path.join(BACKEND_DIR, "..", "rl"))
 
 from healthcare_env import HealthcareRoutingEnv, haversine_distance, compute_eta
 
-
 # ─────────────────────────────────────────────────────────────────────────────
-# In-memory "database" (replace with PostgreSQL/MongoDB for production)
+# In-memory "database"
 # ─────────────────────────────────────────────────────────────────────────────
 
 HOSPITALS: List[Dict] = [
@@ -64,17 +47,15 @@ AMBULANCES: List[Dict] = [
 ]
 
 PATIENTS: Dict[str, Dict]     = {}
-ASSIGNMENTS: List[Dict]        = []
+ASSIGNMENTS: List[Dict]       = []
 
 # ─────────────────────────────────────────────────────────────────────────────
-# RL environment (singleton for inference)
+# RL environment
 # ─────────────────────────────────────────────────────────────────────────────
 rl_env: Optional[HealthcareRoutingEnv] = None
 
-# Try to load trained DQN; fall back to greedy if not available
 try:
     import torch
-    sys.path.insert(0, os.path.join(BACKEND_DIR, "..", "rl"))
     from dqn_agent import DQNAgent
     _model_path = os.path.join(BACKEND_DIR, "..", "rl", "models", "dqn_healthcare.pth")
     dqn_agent: Optional[DQNAgent] = None
@@ -102,15 +83,11 @@ simulation_task    = None
 ws_connections: List[WebSocket] = []
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Pydantic schemas
-# ─────────────────────────────────────────────────────────────────────────────
-
 class PatientIn(BaseModel):
     name:     str            = Field(default="Unknown Patient")
-    severity: float          = Field(..., ge=1, le=10, description="1 = mild, 10 = critical")
-    lat:      float          = Field(..., description="Patient latitude")
-    lon:      float          = Field(..., description="Patient longitude")
+    severity: float          = Field(..., ge=1, le=10)
+    lat:      float          = Field(...)
+    lon:      float          = Field(...)
     notes:    Optional[str]  = None
 
 class AmbulanceLocationUpdate(BaseModel):
@@ -126,69 +103,33 @@ class HospitalBedsUpdate(BaseModel):
     wait_time:       Optional[int] = None
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# App lifespan
-# ─────────────────────────────────────────────────────────────────────────────
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global rl_env
-    rl_env, _ = HealthcareRoutingEnv().__class__(), None
     rl_env = HealthcareRoutingEnv()
     rl_env.reset()
-    print("[Backend] Healthcare Routing API started 🚑")
+    print("[Backend] Healthcare Routing API started")
     yield
     print("[Backend] Shutting down")
 
-
-app = FastAPI(
-    title       = "Healthcare Routing & Emergency Management API",
-    description = "AI-powered hospital routing with live ambulance tracking",
-    version     = "1.0.0",
-    lifespan    = lifespan,
-)
+app = FastAPI(title="SmartER API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins     = ["*"],
-    allow_credentials = True,
-    allow_methods     = ["*"],
-    allow_headers     = ["*"],
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Helper: RL decision
-# ─────────────────────────────────────────────────────────────────────────────
-
 def rl_assign(patient: Dict) -> Dict:
-    """
-    Use the RL model (or greedy fallback) to assign a hospital and ambulance.
-    Returns a dict with hospital, ambulance, eta, reasoning.
-    """
-    # Build RL environment observation
     env = HealthcareRoutingEnv(hospitals=HOSPITALS, ambulances=AMBULANCES)
-    env.hospitals  = [
-        {**h, "beds_available": h["beds_available"], "icu_available": h["icu_available"], "current_wait": h["wait_time"]}
-        for h in HOSPITALS
-    ]
-    env.ambulances = [
-        {**a, "status": a["status"]}
-        for a in AMBULANCES
-    ]
-    env.patient = {
-        "severity": patient["severity"],
-        "lat":      patient["lat"],
-        "lon":      patient["lon"],
-        "traffic":  random.uniform(0.9, 1.8),
-    }
+    env.hospitals  = [{**h, "beds_available": h["beds_available"], "icu_available": h["icu_available"], "current_wait": h["wait_time"]} for h in HOSPITALS]
+    env.ambulances = [{**a, "status": a["status"]} for a in AMBULANCES]
+    env.patient = {"severity": patient["severity"], "lat": patient["lat"], "lon": patient["lon"], "traffic": random.uniform(0.9, 1.8)}
 
     obs = env._get_observation()
-
-    if dqn_agent is not None:
-        action = dqn_agent.greedy_action(obs)
-    else:
-        action = env.get_greedy_action()
+    action = dqn_agent.greedy_action(obs) if dqn_agent else env.get_greedy_action()
 
     hosp_idx, amb_idx = env.decode_action(action)
     hospital  = HOSPITALS[min(hosp_idx, len(HOSPITALS) - 1)]
@@ -202,283 +143,166 @@ def rl_assign(patient: Dict) -> Dict:
     total_eta = round(eta_to_patient + eta_to_hospital, 1)
 
     reasoning = []
-    if hospital["beds_available"] > 0:
-        reasoning.append(f"✅ {hospital['beds_available']} beds available")
-    if patient["severity"] >= 8 and hospital["icu_available"] > 0:
-        reasoning.append(f"🏥 ICU bed available ({hospital['icu_available']} free)")
+    if hospital["beds_available"] > 0: reasoning.append(f"✅ {hospital['beds_available']} beds available")
+    if patient["severity"] >= 8 and hospital["icu_available"] > 0: reasoning.append(f"🏥 ICU bed available ({hospital['icu_available']} free)")
     reasoning.append(f"📍 Ambulance {ambulance['name']} is {dist_amb_patient:.1f} km away")
     reasoning.append(f"⏱ ETA to patient: {eta_to_patient:.1f} min | to hospital: {eta_to_hospital:.1f} min")
 
     return {
-        "hospital":         hospital,
-        "ambulance":        ambulance,
-        "eta_minutes":      total_eta,
-        "dist_amb_patient": round(dist_amb_patient, 2),
-        "dist_to_hospital": round(dist_patient_hosp, 2),
-        "reasoning":        reasoning,
-        "model_used":       "DQN" if dqn_agent else "Greedy",
+        "hospital": hospital, "ambulance": ambulance, "eta_minutes": total_eta,
+        "dist_amb_patient": round(dist_amb_patient, 2), "dist_to_hospital": round(dist_patient_hosp, 2),
+        "reasoning": reasoning, "model_used": "DQN" if dqn_agent else "Greedy",
     }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# REST Endpoints
-# ─────────────────────────────────────────────────────────────────────────────
-
 @app.get("/")
-def root():
-    return {"status": "ok", "message": "Healthcare Routing API v1.0 🚑"}
-
+def root(): return {"status": "ok", "message": "Healthcare Routing API v1.0"}
 
 @app.post("/add_patient")
 def add_patient(patient_in: PatientIn):
-    """Register a new emergency patient and get RL-based resource assignment."""
     patient_id = str(uuid.uuid4())[:8]
-    severity_label = (
-        "critical" if patient_in.severity >= 8
-        else "moderate" if patient_in.severity >= 5
-        else "mild"
-    )
+    severity_label = "critical" if patient_in.severity >= 8 else "moderate" if patient_in.severity >= 5 else "mild"
     patient = {
-        "id":        patient_id,
-        "name":      patient_in.name,
-        "severity":  patient_in.severity,
-        "severity_label": severity_label,
-        "lat":       patient_in.lat,
-        "lon":       patient_in.lon,
-        "notes":     patient_in.notes,
-        "status":    "pending",
-        "timestamp": time.time(),
+        "id": patient_id, "name": patient_in.name, "severity": patient_in.severity,
+        "severity_label": severity_label, "lat": patient_in.lat, "lon": patient_in.lon,
+        "notes": patient_in.notes, "status": "pending", "timestamp": time.time(),
     }
     PATIENTS[patient_id] = patient
-
-    # Run RL assignment
     assignment = rl_assign(patient)
 
-    # Update state
     hosp_id = assignment["hospital"]["id"]
     amb_id  = assignment["ambulance"]["id"]
 
     for h in HOSPITALS:
         if h["id"] == hosp_id:
             h["beds_available"] = max(0, h["beds_available"] - 1)
-            if patient_in.severity >= 8:
-                h["icu_available"] = max(0, h["icu_available"] - 1)
+            if patient_in.severity >= 8: h["icu_available"] = max(0, h["icu_available"] - 1)
             break
 
     for a in AMBULANCES:
         if a["id"] == amb_id:
-            a["status"]           = "busy"
+            a["status"] = "busy"
             a["assigned_patient"] = patient_id
             break
 
     patient["status"] = "assigned"
-    assignment_record = {
-        "patient_id":   patient_id,
-        "hospital_id":  hosp_id,
-        "ambulance_id": amb_id,
-        "eta_minutes":  assignment["eta_minutes"],
-        "timestamp":    time.time(),
-    }
-    ASSIGNMENTS.append(assignment_record)
+    ASSIGNMENTS.append({"patient_id": patient_id, "hospital_id": hosp_id, "ambulance_id": amb_id, "eta_minutes": assignment["eta_minutes"], "timestamp": time.time()})
 
-    return {
-        "patient":    patient,
-        "assignment": assignment,
-        "message":    f"Patient {patient_id} assigned using {assignment['model_used']} model",
-    }
-
+    return {"patient": patient, "assignment": assignment, "message": f"Assigned using {assignment['model_used']}"}
 
 @app.get("/get_hospitals")
-def get_hospitals():
-    """Return all hospitals with current bed availability."""
-    return {"hospitals": HOSPITALS, "count": len(HOSPITALS)}
-
+def get_hospitals(): return {"hospitals": HOSPITALS, "count": len(HOSPITALS)}
 
 @app.get("/get_ambulances")
-def get_ambulances():
-    """Return all ambulances with current GPS positions."""
-    return {"ambulances": AMBULANCES, "count": len(AMBULANCES)}
-
+def get_ambulances(): return {"ambulances": AMBULANCES, "count": len(AMBULANCES)}
 
 @app.post("/assign_resources")
-def assign_resources(patient_in: PatientIn):
-    """
-    Run only the RL assignment (without persisting the patient).
-    Useful for simulations and 'what-if' queries.
-    """
-    patient = patient_in.model_dump()
-    result  = rl_assign(patient)
-    return result
-
+def assign_resources(patient_in: PatientIn): return rl_assign(patient_in.model_dump())
 
 @app.put("/update_ambulance_location")
 def update_ambulance_location(update: AmbulanceLocationUpdate):
-    """Update ambulance GPS position (called by simulation engine / real GPS)."""
     for a in AMBULANCES:
         if a["id"] == update.ambulance_id:
-            a["lat"] = update.lat
-            a["lon"] = update.lon
-            if update.status:
-                a["status"] = update.status
+            a["lat"], a["lon"] = update.lat, update.lon
+            if update.status: a["status"] = update.status
             return {"ok": True, "ambulance": a}
-    raise HTTPException(status_code=404, detail=f"Ambulance {update.ambulance_id} not found")
-
+    raise HTTPException(status_code=404, detail="Ambulance not found")
 
 @app.put("/update_hospital_beds")
 def update_hospital_beds(update: HospitalBedsUpdate):
-    """Update hospital resource availability."""
     for h in HOSPITALS:
         if h["id"] == update.hospital_id:
-            if update.beds_available is not None:
-                h["beds_available"] = update.beds_available
-            if update.icu_available is not None:
-                h["icu_available"] = update.icu_available
-            if update.wait_time is not None:
-                h["wait_time"] = update.wait_time
+            if update.beds_available is not None: h["beds_available"] = update.beds_available
+            if update.icu_available is not None: h["icu_available"] = update.icu_available
+            if update.wait_time is not None: h["wait_time"] = update.wait_time
             return {"ok": True, "hospital": h}
-    raise HTTPException(status_code=404, detail=f"Hospital {update.hospital_id} not found")
-
+    raise HTTPException(status_code=404, detail="Hospital not found")
 
 @app.get("/get_live_tracking")
 def get_live_tracking():
-    """Return a complete live snapshot for the map view."""
-    return {
-        "timestamp":  time.time(),
-        "hospitals":  HOSPITALS,
-        "ambulances": AMBULANCES,
-        "patients":   list(PATIENTS.values()),
-        "assignments": ASSIGNMENTS[-20:],  # last 20
-    }
-
+    return {"timestamp": time.time(), "hospitals": HOSPITALS, "ambulances": AMBULANCES, "patients": list(PATIENTS.values()), "assignments": ASSIGNMENTS[-20:]}
 
 @app.get("/patients")
-def get_patients():
-    return {"patients": list(PATIENTS.values()), "count": len(PATIENTS)}
-
+def get_patients(): return {"patients": list(PATIENTS.values()), "count": len(PATIENTS)}
 
 @app.get("/stats")
 def get_stats():
-    """Dashboard statistics."""
     total_beds = sum(h["total_beds"] for h in HOSPITALS)
     used_beds  = sum(h["total_beds"] - h["beds_available"] for h in HOSPITALS)
     return {
-        "total_patients":     len(PATIENTS),
-        "total_assignments":  len(ASSIGNMENTS),
-        "total_beds":         total_beds,
-        "beds_in_use":        used_beds,
-        "bed_occupancy_pct":  round(used_beds / max(total_beds, 1) * 100, 1),
-        "available_ambs":     sum(1 for a in AMBULANCES if a["status"] == "available"),
-        "busy_ambs":          sum(1 for a in AMBULANCES if a["status"] == "busy"),
-        "hospitals":          [
-            {
-                "name":           h["name"],
-                "occupancy_pct":  round((h["total_beds"] - h["beds_available"]) / h["total_beds"] * 100, 1),
-                "icu_occupancy":  round((h["icu_beds"] - h["icu_available"]) / h["icu_beds"] * 100, 1),
-            }
-            for h in HOSPITALS
-        ]
+        "total_patients": len(PATIENTS), "total_assignments": len(ASSIGNMENTS),
+        "total_beds": total_beds, "beds_in_use": used_beds, "bed_occupancy_pct": round(used_beds / max(total_beds, 1) * 100, 1),
+        "available_ambs": sum(1 for a in AMBULANCES if a["status"] == "available"),
+        "busy_ambs": sum(1 for a in AMBULANCES if a["status"] == "busy"),
+        "hospitals": [{"name": h["name"], "occupancy_pct": round((h["total_beds"] - h["beds_available"]) / h["total_beds"] * 100, 1), "icu_occupancy": round((h["icu_beds"] - h["icu_available"]) / h["icu_beds"] * 100, 1)} for h in HOSPITALS]
     }
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Simulation Engine
-# ─────────────────────────────────────────────────────────────────────────────
-
+# ── FIXED SIMULATION LOGIC: FAST SMOOTH TICKING ────────────────────────────
 async def simulation_loop():
-    """Background task: generate patients, move ambulances, push via WebSocket."""
     global simulation_running
     LAT_MIN, LAT_MAX = 12.85, 13.10
     LON_MIN, LON_MAX = 77.45, 77.75
 
     while simulation_running:
-        # ── Move busy ambulances toward their destination ─────────────────
         for a in AMBULANCES:
             if a["status"] == "busy" and a.get("assigned_patient"):
-                pid     = a["assigned_patient"]
+                pid = a["assigned_patient"]
                 patient = PATIENTS.get(pid)
                 if patient:
-                    # Move ambulance 0.002° toward patient
                     dlat = patient["lat"] - a["lat"]
                     dlon = patient["lon"] - a["lon"]
                     dist = math.sqrt(dlat**2 + dlon**2)
-                    if dist > 0.002:
-                        a["lat"] += (dlat / dist) * 0.002
-                        a["lon"] += (dlon / dist) * 0.002
+                    
+                    speed = 0.008 # High speed for visible, smooth simulation
+                    
+                    if dist > speed:
+                        a["lat"] += (dlat / dist) * speed
+                        a["lon"] += (dlon / dist) * speed
                     else:
-                        # Arrived – free ambulance
-                        a["status"]           = "available"
+                        a["lat"] = patient["lat"]
+                        a["lon"] = patient["lon"]
+                        a["status"] = "available"
                         a["assigned_patient"] = None
                         PATIENTS[pid]["status"] = "admitted"
 
-        # ── Occasionally generate a new simulated patient ─────────────────
-        if random.random() < 0.3:  # 30% chance each tick
-            fake_patient = PatientIn(
-                name     = f"Sim-Patient-{random.randint(100, 999)}",
-                severity = round(random.uniform(1, 10), 1),
-                lat      = random.uniform(LAT_MIN, LAT_MAX),
-                lon      = random.uniform(LON_MIN, LON_MAX),
-            )
+        if random.random() < 0.15:
+            fake_patient = PatientIn(name=f"Sim-PT-{random.randint(100, 999)}", severity=round(random.uniform(1, 10), 1), lat=random.uniform(LAT_MIN, LAT_MAX), lon=random.uniform(LON_MIN, LON_MAX))
             add_patient(fake_patient)
 
-        # ── Slowly restore hospital beds (discharge simulation) ───────────
         for h in HOSPITALS:
-            if random.random() < 0.2 and h["beds_available"] < h["total_beds"]:
-                h["beds_available"] += 1
-            if random.random() < 0.1 and h["icu_available"] < h["icu_beds"]:
-                h["icu_available"] += 1
+            if random.random() < 0.05 and h["beds_available"] < h["total_beds"]: h["beds_available"] += 1
+            if random.random() < 0.02 and h["icu_available"] < h["icu_beds"]: h["icu_available"] += 1
 
-        # ── Push live update to all WebSocket clients ─────────────────────
         if ws_connections:
-            payload = json.dumps({
-                "type":       "live_update",
-                "timestamp":  time.time(),
-                "ambulances": AMBULANCES,
-                "hospitals":  HOSPITALS,
-                "patients":   list(PATIENTS.values())[-10:],
-            })
+            payload = json.dumps({"type": "live_update", "timestamp": time.time(), "ambulances": AMBULANCES, "hospitals": HOSPITALS, "patients": list(PATIENTS.values())[-10:]})
             dead = []
             for ws in ws_connections:
-                try:
-                    await ws.send_text(payload)
-                except Exception:
-                    dead.append(ws)
-            for ws in dead:
-                ws_connections.remove(ws)
+                try: await ws.send_text(payload)
+                except Exception: dead.append(ws)
+            for ws in dead: ws_connections.remove(ws)
 
-        await asyncio.sleep(2)  # update every 2 seconds
-
+        await asyncio.sleep(0.5) # 0.5s tick rate for fluid movement
 
 @app.get("/simulation/start")
 async def start_simulation():
     global simulation_running, simulation_task
-    if simulation_running:
-        return {"message": "Simulation already running"}
+    if simulation_running: return {"message": "Simulation already running"}
     simulation_running = True
-    simulation_task    = asyncio.create_task(simulation_loop())
-    return {"message": "Simulation started 🚑"}
-
+    simulation_task = asyncio.create_task(simulation_loop())
+    return {"message": "Simulation started"}
 
 @app.get("/simulation/stop")
 async def stop_simulation():
     global simulation_running, simulation_task
     simulation_running = False
-    if simulation_task:
-        simulation_task.cancel()
+    if simulation_task: simulation_task.cancel()
     return {"message": "Simulation stopped"}
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# WebSocket
-# ─────────────────────────────────────────────────────────────────────────────
 
 @app.websocket("/ws/live")
 async def websocket_live(websocket: WebSocket):
-    """Real-time push channel for live map updates."""
     await websocket.accept()
     ws_connections.append(websocket)
     try:
-        while True:
-            # Keep connection alive; actual data is pushed by simulation_loop
-            await websocket.receive_text()
+        while True: await websocket.receive_text()
     except WebSocketDisconnect:
         ws_connections.remove(websocket)
